@@ -1,0 +1,13 @@
+{
+  "name": "constant-smm-deals",
+  "version": "1.0.0",
+  "description": "Telegram SMM Deals Bot",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "grammy": "^1.32.0",
+    "firebase-admin": "^12.0.0"
+  }
+}
