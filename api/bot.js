@@ -148,48 +148,68 @@ bot.callbackQuery(/^paid_([0-9.]+)$/, async (ctx) => {
 bot.on("callback_query:data", async (ctx, next) => {
     const data = ctx.callbackQuery.data;
     
-    // Check if it's an admin action
     if (data.startsWith("accept_") || data.startsWith("decline_")) {
-        if (ctx.dbUser.role !== "admin") return ctx.answerCallbackQuery("❌ You are not an admin!");
+        // 1. Sabse pehle loading spinner band karein!
+        await ctx.answerCallbackQuery("Processing request...");
 
-        const action = data.split("_")[0]; 
-        const reqId = data.split("_")[1];
+        if (ctx.dbUser.role !== "admin") {
+            return ctx.reply("❌ You are not an admin!");
+        }
 
-        const reqRef = db.collection("paymentRequests").doc(reqId);
-        const reqDoc = await reqRef.get();
+        try {
+            const action = data.split("_")[0]; 
+            const reqId = data.split("_")[1];
 
-        if (!reqDoc.exists) return ctx.answerCallbackQuery("❌ Request not found.", { show_alert: true });
-        
-        const reqData = reqDoc.data();
-        if (reqData.status !== "pending") return ctx.answerCallbackQuery(`⚠️ This request was already ${reqData.status}.`, { show_alert: true });
+            const reqRef = db.collection("paymentRequests").doc(reqId);
+            const reqDoc = await reqRef.get();
 
-        await reqRef.update({ status: action });
-
-        if (action === "accept") {
-            const requestTimeMillis = reqData.timestamp.toMillis();
-            const diffInMinutes = (Date.now() - requestTimeMillis) / 60000;
+            if (!reqDoc.exists) {
+                return ctx.editMessageText("❌ Request not found or already deleted.");
+            }
             
-            let finalAmount = reqData.amount;
-            let bonusMessage = "";
-
-            // 10 Min Late Bonus Logic
-            if (diffInMinutes > 10) {
-                const bonus = parseFloat((reqData.amount * 0.05).toFixed(2));
-                finalAmount = parseFloat((reqData.amount + bonus).toFixed(2));
-                bonusMessage = `\n\n🎁 *Bonus Added:* We were running late (took >10 mins). A 5% bonus (₹${bonus}) has been added!`;
+            const reqData = reqDoc.data();
+            if (reqData.status !== "pending") {
+                return ctx.editMessageText(`⚠️ This request was already ${reqData.status}.`);
             }
 
-            await db.collection("users").doc(reqData.userId).update({
-                walletBalance: admin.firestore.FieldValue.increment(finalAmount)
-            });
+            // Lock the request
+            await reqRef.update({ status: action });
 
-            await ctx.editMessageText(ctx.callbackQuery.message.text + `\n\n✅ **Status: Accepted (₹${finalAmount} Credited)**`, { parse_mode: "Markdown" });
-            await bot.api.sendMessage(reqData.userId, `🎉 **Payment Verified!**\n\n**₹${finalAmount}** added to your wallet.\nRequest ID: #${reqId}${bonusMessage}`, { parse_mode: "Markdown" });
-        } else {
-            await ctx.editMessageText(ctx.callbackQuery.message.text + "\n\n❌ **Status: Declined**", { parse_mode: "Markdown" });
-            await bot.api.sendMessage(reqData.userId, `❌ **Payment Declined!**\n\nRequest (ID: #${reqId}) was declined. Contact support if money was deducted.`, { parse_mode: "Markdown" });
+            if (action === "accept") {
+                // Safely calculate SLA Bonus
+                let diffInMinutes = 0;
+                if (reqData.timestamp) {
+                    const requestTimeMillis = reqData.timestamp.toMillis();
+                    diffInMinutes = (Date.now() - requestTimeMillis) / 60000;
+                }
+                
+                let finalAmount = reqData.amount;
+                let bonusMessage = "";
+
+                if (diffInMinutes > 10) {
+                    const bonus = parseFloat((reqData.amount * 0.05).toFixed(2));
+                    finalAmount = parseFloat((reqData.amount + bonus).toFixed(2));
+                    bonusMessage = `\n\n🎁 *Bonus Added:* We were running late (took >10 mins). A 5% bonus (₹${bonus}) has been added!`;
+                }
+
+                // Add balance
+                await db.collection("users").doc(reqData.userId).update({
+                    walletBalance: admin.firestore.FieldValue.increment(finalAmount)
+                });
+
+                // Update Admin screen (Clean String to prevent markdown crash)
+                await ctx.editMessageText(`🔔 **Payment Request**\n👤 User ID: \`${reqData.userId}\`\n💰 Amount: ₹${reqData.amount}\n🆔 ID: #${reqId}\n\n✅ **Status: ACCEPTED (₹${finalAmount} Credited)**`, { parse_mode: "Markdown" });
+                
+                // Notify User
+                await bot.api.sendMessage(reqData.userId, `🎉 **Payment Verified!**\n\n**₹${finalAmount}** added to your wallet.\nRequest ID: #${reqId}${bonusMessage}`, { parse_mode: "Markdown" });
+            } else {
+                await ctx.editMessageText(`🔔 **Payment Request**\n👤 User ID: \`${reqData.userId}\`\n💰 Amount: ₹${reqData.amount}\n🆔 ID: #${reqId}\n\n❌ **Status: DECLINED**`, { parse_mode: "Markdown" });
+                await bot.api.sendMessage(reqData.userId, `❌ **Payment Declined!**\n\nRequest (ID: #${reqId}) was declined. Contact support if money was deducted.`, { parse_mode: "Markdown" });
+            }
+        } catch (error) {
+            console.error(error);
+            await ctx.reply("❌ An error occurred during verification. Check Vercel logs.");
         }
-        await ctx.answerCallbackQuery(`Payment ${action}ed!`);
     } else {
         return next();
     }
