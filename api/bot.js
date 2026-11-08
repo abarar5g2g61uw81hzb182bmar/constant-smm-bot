@@ -95,7 +95,7 @@ bot.hears("💳 My Wallet", async (ctx) => {
 bot.callbackQuery("add_money", async (ctx) => {
     await ctx.answerCallbackQuery();
     // YAHAN APNA UPI ID DAALEIN 👇
-    const upiId = "constantabrar@upi"; 
+    const upiId = "yourupi@okbank"; 
     
     const text = `🏦 **Add Money to Wallet**\n\n1️⃣ Send money to this UPI ID: \`${upiId}\`\n2️⃣ Minimum deposit is ₹5.\n\n⚠️ *Click the button below ONLY AFTER making the payment.*`;
     const inlineKeyboard = new InlineKeyboard().text("✅ I have Paid", "paid_step");
