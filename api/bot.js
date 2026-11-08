@@ -1,7 +1,7 @@
 const { Bot, webhookCallback, Keyboard, InlineKeyboard } = require("grammy");
 const admin = require("firebase-admin");
 
-// 1. Firebase Secure Connection
+// 1. Firebase Connection
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -14,7 +14,7 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 const bot = new Bot(process.env.BOT_TOKEN);
 
-// 2. User Profile Middleware
+// 2. User Middleware
 bot.use(async (ctx, next) => {
     if (!ctx.from) return next();
     
@@ -50,77 +50,67 @@ bot.command("permanentlyswitchtoadmin", async (ctx) => {
         await db.collection('users').doc(userId).update({ role: "admin" });
         ctx.dbUser.role = "admin"; 
         
-        const adminMenu = new Keyboard()
-            .text("🔔 Pending Payments").text("⚙️ Manage Services").row()
-            .text("👥 User Details").text("📢 Broadcast").row()
-            .resized();
-
+        const adminMenu = new Keyboard().text("🔔 Pending Payments").text("⚙️ Manage Services").row().text("👥 User Details").text("📢 Broadcast").row().resized();
         await ctx.reply("✅ **Access Granted!** You are now permanently an Admin.", { parse_mode: "Markdown", reply_markup: adminMenu });
     } else {
         await ctx.reply("❌ Invalid login code. Access Denied.");
     }
 });
 
-// 4. Normal /start Command
+// 4. /start Command
 bot.command("start", async (ctx) => {
     if (ctx.dbUser.role === "admin") {
         const adminMenu = new Keyboard().text("🔔 Pending Payments").text("⚙️ Manage Services").row().text("👥 User Details").text("📢 Broadcast").row().resized();
-        return ctx.reply(`Welcome back, Admin ${ctx.from.first_name}! ⚙️\nSystem is fully automated and running smoothly.`, { reply_markup: adminMenu });
+        return ctx.reply(`Welcome back, Admin ${ctx.from.first_name}! ⚙️`, { reply_markup: adminMenu });
     }
 
     const menuKeyboard = new Keyboard().text("🛍 Available Deals").row().text("💳 My Wallet").text("📦 My Orders").row().text("🎧 Customer Support").row().resized();
     await ctx.reply(`Hello ${ctx.from.first_name}, welcome to Constant SMM Deals! 🚀\n\nPlease choose an option below:`, { reply_markup: menuKeyboard });
 });
 
-// 5. 💳 My Wallet & Add Money Flow
+// 5. 💳 Wallet & Ask Amount
 bot.hears("💳 My Wallet", async (ctx) => {
-    await db.collection('users').doc(ctx.from.id.toString()).update({ step: "none" }); // Reset step
+    await db.collection('users').doc(ctx.from.id.toString()).update({ step: "none" }); 
     const balance = ctx.dbUser.walletBalance || 0;
     const inlineKeyboard = new InlineKeyboard().text("➕ Add Money", "ask_amount");
-    
-    await ctx.reply(`💳 **Your Wallet**\n\n💰 Current Balance: ₹${balance.toFixed(2)}`, { 
-        parse_mode: "Markdown", 
-        reply_markup: inlineKeyboard 
-    });
+    await ctx.reply(`💳 **Your Wallet**\n\n💰 Current Balance: ₹${balance.toFixed(2)}`, { parse_mode: "Markdown", reply_markup: inlineKeyboard });
 });
 
-// Ask for exact amount
 bot.callbackQuery("ask_amount", async (ctx) => {
     await ctx.answerCallbackQuery();
     await db.collection('users').doc(ctx.from.id.toString()).update({ step: "entering_amount" });
-    
     await ctx.reply("💬 **How much money do you want to add?**\n\n*(Minimum is ₹5. You can enter decimals like 10.50, 50, etc.)*", { parse_mode: "Markdown" });
 });
 
-// 6. Handle Exact Amount & Generate QR Code
+// 6. Generate QR with 5-Second Safe Delay
 bot.on("message:text", async (ctx) => {
-    const text = ctx.message.text;
-    const userId = ctx.from.id.toString();
-
-    // Check if user is in "entering_amount" step
     if (ctx.dbUser.step === "entering_amount") {
+        const text = ctx.message.text;
+        const userId = ctx.from.id.toString();
         const amount = parseFloat(text);
         
-        if (isNaN(amount) || amount < 5) {
-            return ctx.reply("❌ Invalid amount. Minimum deposit is ₹5. Please enter a valid number.");
-        }
+        if (isNaN(amount) || amount < 5) return ctx.reply("❌ Invalid amount. Minimum deposit is ₹5.");
 
-        // Reset step so they don't get stuck
         await db.collection('users').doc(userId).update({ step: "none" });
 
         const upiId = "constantabrar@upi";
-        
-        // Exact Amount UPI Link & QR Image Generation
         const upiLink = `upi://pay?pa=${upiId}&pn=Constant%20SMM&am=${amount}&cu=INR`;
         const qrUrl = `https://quickchart.io/qr?text=${encodeURIComponent(upiLink)}&size=400&margin=2`;
 
-        const inlineBtn = new InlineKeyboard().text("✅ PAID, PLEASE CHECK", `paid_${amount}`);
+        const sentMsg = await ctx.replyWithPhoto(qrUrl, {
+            caption: `🏦 **Scan to Pay: ₹${amount}**\n\nOr pay directly to UPI ID: \`${upiId}\`\n\n⏳ *Verification button will appear here in 5 seconds...*`,
+            parse_mode: "Markdown"
+        });
 
-        await ctx.replyWithPhoto(qrUrl, {
-            caption: `🏦 **Scan to Pay: ₹${amount}**\n\nOr pay directly to UPI ID: \`${upiId}\`\n\n⚠️ *Please make the payment first, then click the verification button below.*`,
+        // Safe 5-Second Delay (Forces Vercel to stay awake)
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        const inlineBtn = new InlineKeyboard().text("✅ PAID, PLEASE CHECK", `paid_${amount}`);
+        await ctx.api.editMessageCaption(ctx.chat.id, sentMsg.message_id, {
+            caption: `🏦 **Scan to Pay: ₹${amount}**\n\nOr pay directly to UPI ID: \`${upiId}\`\n\n✅ *Click the button below to confirm payment.*`,
             parse_mode: "Markdown",
             reply_markup: inlineBtn
-        });
+        }).catch(() => {});
     }
 });
 
@@ -128,85 +118,81 @@ bot.on("message:text", async (ctx) => {
 bot.callbackQuery(/^paid_([0-9.]+)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     const amount = parseFloat(ctx.match[1]);
-    const reqId = "REQ" + Date.now().toString().slice(-6);
+    const reqId = "REQ" + Math.floor(100000 + Math.random() * 900000); // Bulletproof 6-digit ID
     const userId = ctx.from.id.toString();
 
-    // Remove the button so they can't spam it
     await ctx.editMessageReplyMarkup({ reply_markup: null });
 
-    // Save request to Database
     await db.collection("paymentRequests").doc(reqId).set({
         userId: userId,
         amount: amount,
         status: "pending",
-        timestamp: admin.firestore.FieldValue.serverTimestamp() // For SLA calculation
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
     });
 
     await ctx.reply(`⏳ Request ID: **#${reqId}** generated for **₹${amount}**.\n\nYou will be notified within 10 minutes.`, { parse_mode: "Markdown" });
 
-    // Alert All Admins
+    // Alert Admins
     const adminsSnapshot = await db.collection("users").where("role", "==", "admin").get();
-    const adminKeyboard = new InlineKeyboard()
-        .text("✅ Accept", `accept_${reqId}`)
-        .text("❌ Decline", `decline_${reqId}`);
-
     const adminAlert = `🔔 **New Payment Request**\n\n👤 User: ${ctx.from.first_name} (ID: \`${userId}\`)\n💰 Amount: ₹${amount}\n🆔 ID: #${reqId}\n\nVerify in your Bank App!`;
 
     adminsSnapshot.forEach(async (adminDoc) => {
+        const adminKeyboard = new InlineKeyboard()
+            .text("✅ Accept", `accept_${reqId}`)
+            .text("❌ Decline", `decline_${reqId}`);
         await bot.api.sendMessage(adminDoc.id, adminAlert, { parse_mode: "Markdown", reply_markup: adminKeyboard });
     });
 });
 
-// 8. Admin SLA & Approval Logic (Accept/Decline)
-bot.callbackQuery(/^(accept|decline)_(REQ[0-9]+)$/, async (ctx) => {
-    if (ctx.dbUser.role !== "admin") return ctx.answerCallbackQuery("❌ You are not an admin!");
-
-    const action = ctx.match[1]; 
-    const reqId = ctx.match[2];
-
-    const reqRef = db.collection("paymentRequests").doc(reqId);
-    const reqDoc = await reqRef.get();
-
-    if (!reqDoc.exists) return ctx.answerCallbackQuery("❌ Request not found.", { show_alert: true });
+// 8. Fixed Admin SLA & Approval Logic
+bot.on("callback_query:data", async (ctx, next) => {
+    const data = ctx.callbackQuery.data;
     
-    const reqData = reqDoc.data();
-    if (reqData.status !== "pending") return ctx.answerCallbackQuery(`⚠️ This request was already ${reqData.status}.`, { show_alert: true });
+    // Check if it's an admin action
+    if (data.startsWith("accept_") || data.startsWith("decline_")) {
+        if (ctx.dbUser.role !== "admin") return ctx.answerCallbackQuery("❌ You are not an admin!");
 
-    // Lock the request
-    await reqRef.update({ status: action });
+        const action = data.split("_")[0]; 
+        const reqId = data.split("_")[1];
 
-    if (action === "accept") {
-        // Calculate 10-Minute SLA & Bonus
-        const requestTimeMillis = reqData.timestamp.toMillis();
-        const currentTimeMillis = Date.now();
-        const diffInMinutes = (currentTimeMillis - requestTimeMillis) / 60000;
+        const reqRef = db.collection("paymentRequests").doc(reqId);
+        const reqDoc = await reqRef.get();
+
+        if (!reqDoc.exists) return ctx.answerCallbackQuery("❌ Request not found.", { show_alert: true });
         
-        let finalAmount = reqData.amount;
-        let bonusMessage = "";
-        let bonusPercent = 5; // Configurable bonus %
+        const reqData = reqDoc.data();
+        if (reqData.status !== "pending") return ctx.answerCallbackQuery(`⚠️ This request was already ${reqData.status}.`, { show_alert: true });
 
-        if (diffInMinutes > 10) {
-            const bonus = parseFloat((reqData.amount * (bonusPercent / 100)).toFixed(2));
-            finalAmount = parseFloat((reqData.amount + bonus).toFixed(2));
-            bonusMessage = `\n\n🎁 *Bonus Added:* We were running late (took more than 10 mins). As an apology, a ${bonusPercent}% bonus (₹${bonus}) has been automatically added to your deposit!`;
+        await reqRef.update({ status: action });
+
+        if (action === "accept") {
+            const requestTimeMillis = reqData.timestamp.toMillis();
+            const diffInMinutes = (Date.now() - requestTimeMillis) / 60000;
+            
+            let finalAmount = reqData.amount;
+            let bonusMessage = "";
+
+            // 10 Min Late Bonus Logic
+            if (diffInMinutes > 10) {
+                const bonus = parseFloat((reqData.amount * 0.05).toFixed(2));
+                finalAmount = parseFloat((reqData.amount + bonus).toFixed(2));
+                bonusMessage = `\n\n🎁 *Bonus Added:* We were running late (took >10 mins). A 5% bonus (₹${bonus}) has been added!`;
+            }
+
+            await db.collection("users").doc(reqData.userId).update({
+                walletBalance: admin.firestore.FieldValue.increment(finalAmount)
+            });
+
+            await ctx.editMessageText(ctx.callbackQuery.message.text + `\n\n✅ **Status: Accepted (₹${finalAmount} Credited)**`, { parse_mode: "Markdown" });
+            await bot.api.sendMessage(reqData.userId, `🎉 **Payment Verified!**\n\n**₹${finalAmount}** added to your wallet.\nRequest ID: #${reqId}${bonusMessage}`, { parse_mode: "Markdown" });
+        } else {
+            await ctx.editMessageText(ctx.callbackQuery.message.text + "\n\n❌ **Status: Declined**", { parse_mode: "Markdown" });
+            await bot.api.sendMessage(reqData.userId, `❌ **Payment Declined!**\n\nRequest (ID: #${reqId}) was declined. Contact support if money was deducted.`, { parse_mode: "Markdown" });
         }
-
-        // Update Wallet Balance
-        await db.collection("users").doc(reqData.userId).update({
-            walletBalance: admin.firestore.FieldValue.increment(finalAmount)
-        });
-
-        // Update Admin Message
-        await ctx.editMessageText(ctx.callbackQuery.message.text + `\n\n✅ **Status: Accepted (₹${finalAmount} Credited)**`, { parse_mode: "Markdown" });
-        
-        // Notify Customer
-        await bot.api.sendMessage(reqData.userId, `🎉 **Payment Verified!**\n\n**₹${finalAmount}** has been successfully added to your wallet.\nRequest ID: #${reqId}${bonusMessage}`, { parse_mode: "Markdown" });
+        await ctx.answerCallbackQuery(`Payment ${action}ed!`);
     } else {
-        await ctx.editMessageText(ctx.callbackQuery.message.text + "\n\n❌ **Status: Declined**", { parse_mode: "Markdown" });
-        await bot.api.sendMessage(reqData.userId, `❌ **Payment Declined!**\n\nYour request for ₹${reqData.amount} (ID: #${reqId}) was declined. Please contact support if money was deducted.`, { parse_mode: "Markdown" });
+        return next();
     }
-    await ctx.answerCallbackQuery(`Payment ${action}ed!`);
 });
 
-// Export as Webhook for Vercel
 module.exports = webhookCallback(bot, "http");
