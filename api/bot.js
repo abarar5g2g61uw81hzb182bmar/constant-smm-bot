@@ -243,6 +243,12 @@ bot.callbackQuery(/^toggle_srv_(.+)$/, async (ctx) => {
         await ctx.editMessageText(`Service updated! It is now ${newStatus ? "✅ Live" : "❌ Hidden"}.`);
     }
 });
+// --- ADMIN: USER MANAGEMENT ---
+bot.hears("👥 User Details", async (ctx) => {
+    if (ctx.dbUser.role !== "admin") return;
+    await ctx.updateState("waiting_for_user_id", {});
+    await ctx.reply("👥 **User Management**\n\nPlease enter the Telegram User ID of the customer you want to check:");
+});
 
 // ==========================================
 // 7. CUSTOMER: SMM DEALS & ORDERS
@@ -350,7 +356,47 @@ bot.on("message:text", async (ctx, next) => {
         }
         return ctx.reply(`✅ Broadcast sent to ${count} users.`);
     }
+    // --- ADMIN: USER DETAILS & EDIT BALANCE FLOW ---
+    if (step === "waiting_for_user_id") {
+        const targetUserId = text.trim();
+        const targetUserRef = db.collection("users").doc(targetUserId);
+        const targetDoc = await targetUserRef.get();
 
+        if (!targetDoc.exists) {
+            await ctx.updateState("none", {});
+            return ctx.reply("❌ User not found in the database.");
+        }
+
+        const tUser = targetDoc.data();
+        const ordersSnapshot = await db.collection("orders").where("userId", "==", targetUserId).get();
+        
+        let msg = `👤 **User Profile**\n\n`;
+        msg += `**ID:** \`${targetUserId}\`\n`;
+        msg += `**Name:** ${tUser.firstName}\n`;
+        msg += `**Role:** ${tUser.role}\n`;
+        msg += `**Wallet Balance:** ₹${(tUser.walletBalance || 0).toFixed(2)}\n`;
+        msg += `**Total Orders:** ${ordersSnapshot.size}\n\n`;
+        msg += `*Type a number (e.g., 50 to add, -20 to deduct) to manually adjust this user's balance, or type /cancel.*`;
+
+        await ctx.updateState("admin_edit_balance", { targetUserId });
+        return ctx.reply(msg, { parse_mode: "Markdown" });
+    }
+
+    if (step === "admin_edit_balance") {
+        const amount = parseFloat(text);
+        if (isNaN(amount)) return ctx.reply("❌ Please enter a valid number (e.g., 50 or -50).");
+
+        const targetUserId = data.targetUserId;
+        await db.collection("users").doc(targetUserId).update({
+            walletBalance: admin.firestore.FieldValue.increment(amount)
+        });
+
+        await ctx.updateState("none", {});
+        await ctx.reply(`✅ Successfully added/deducted **₹${amount}** for user \`${targetUserId}\`.`, { parse_mode: "Markdown" });
+        await bot.api.sendMessage(targetUserId, `🔔 **Wallet Update**\n\nAdmin has manually adjusted your balance by **₹${amount}**.`, { parse_mode: "Markdown" });
+        return;
+          }
+  
     // --- CUSTOMER: DYNAMIC ORDER CHECKOUT FLOW ---
     if (step && step.startsWith("order_q_")) {
         data.answers.push({ question: data.service.questions[data.currentQIndex], answer: text });
