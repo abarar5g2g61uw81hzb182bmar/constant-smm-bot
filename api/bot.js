@@ -87,12 +87,12 @@ bot.hears("🎧 Customer Support", async (ctx) => {
 });
 
 // ==========================================
-// 4. WALLET, ADD MONEY & PROMO REDEEM
+// 4. WALLET & ADD MONEY 
 // ==========================================
 bot.hears("💳 My Wallet", async (ctx) => {
     await ctx.updateState("none", {}); 
     const balance = ctx.dbUser.walletBalance || 0;
-    const inline = new InlineKeyboard().text("➕ Add Money", "ask_amount").text("🎁 Redeem Promo", "ask_promo");
+    const inline = new InlineKeyboard().text("➕ Add Money", "ask_amount");
     await ctx.reply(`💳 **Your Wallet**\n\n💰 Current Balance: ₹${balance.toFixed(2)}`, { parse_mode: "Markdown", reply_markup: inline });
 });
 
@@ -102,13 +102,6 @@ bot.callbackQuery("ask_amount", async (ctx) => {
     await ctx.reply("💬 **How much money do you want to add?**\n*(Minimum is ₹5)*", { parse_mode: "Markdown" });
 });
 
-bot.callbackQuery("ask_promo", async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await ctx.updateState("entering_promo", {});
-    await ctx.reply("🎁 **Enter your Promo Code:**", { parse_mode: "Markdown" });
-});
-
-// Generate QR Code Delay Logic
 bot.on("message:text", async (ctx, next) => {
     if (ctx.dbUser.step === "entering_amount") {
         const amount = parseFloat(ctx.message.text);
@@ -222,11 +215,12 @@ bot.hears("🎁 Manage Promos", async (ctx) => {
     const inline = new InlineKeyboard().text("➕ Create Promo Code", "admin_add_promo");
     
     const snapshot = await db.collection("promos").get();
-    let text = "🎁 **Active Promo Codes:**\n\n";
+    let text = "🎁 **Active Checkout Promos:**\n\n";
     if (snapshot.empty) text += "No promos active.\n";
     snapshot.forEach(doc => {
         const p = doc.data();
-        text += `🎟 **${doc.id}** | 💰 ₹${p.amount} | 👥 Uses: ${p.usedBy.length}/${p.maxUses}\n`;
+        const typeStr = p.type === "FLAT" ? `₹${p.value} Off` : `${p.value}% Off`;
+        text += `🎟 **${doc.id}** | ${typeStr} (Min Order: ₹${p.minOrder})\n👥 Uses: ${p.usedBy.length}/${p.maxUses}\n\n`;
     });
     
     await ctx.reply(text, { parse_mode: "Markdown", reply_markup: inline });
@@ -235,7 +229,7 @@ bot.hears("🎁 Manage Promos", async (ctx) => {
 bot.callbackQuery("admin_add_promo", async (ctx) => {
     await ctx.answerCallbackQuery();
     await ctx.updateState("add_promo_code", {});
-    await ctx.reply("Step 1/3: Enter the **Promo Code text** (e.g., FESTIVAL50):");
+    await ctx.reply("Step 1/5: Enter the **Promo Code text** (e.g., FESTIVAL50):");
 });
 
 bot.callbackQuery("admin_add_service", async (ctx) => {
@@ -295,7 +289,7 @@ bot.hears("📦 My Orders", async (ctx) => {
     let text = "📦 **Your Recent Orders:**\n\n";
     snapshot.forEach(doc => {
         const o = doc.data();
-        text += `🆔 **#${doc.id}**\n🛒 Service: ${o.serviceName}\n🔢 Qty: ${o.quantity} | 💰 ₹${o.totalPrice}\n⏳ Status: **${o.status.toUpperCase()}**\n\n`;
+        text += `🆔 **#${doc.id}**\n🛒 Service: ${o.serviceName}\n🔢 Qty: ${o.quantity} | 💰 Paid: ₹${o.finalPrice}\n⏳ Status: **${o.status.toUpperCase()}**\n\n`;
     });
     await ctx.reply(text, { parse_mode: "Markdown" });
 });
@@ -325,38 +319,28 @@ bot.on("message:text", async (ctx, next) => {
         return ctx.reply("✅ Action cancelled.");
     }
 
-    // --- PROMO CODE REDEEM (CUSTOMER) ---
-    if (step === "entering_promo") {
-        const code = text.trim().toUpperCase();
-        const promoRef = db.collection("promos").doc(code);
-        const promoDoc = await promoRef.get();
-
-        if (!promoDoc.exists) return ctx.reply("❌ Invalid Promo Code.");
-        const promoData = promoDoc.data();
-
-        if (promoData.usedBy.includes(userId)) return ctx.reply("⚠️ You have already used this promo code.");
-        if (promoData.usedBy.length >= promoData.maxUses) return ctx.reply("❌ This promo code has reached its maximum usage limit.");
-
-        // Apply Promo
-        await db.collection("users").doc(userId).update({ walletBalance: admin.firestore.FieldValue.increment(promoData.amount) });
-        await promoRef.update({ usedBy: admin.firestore.FieldValue.arrayUnion(userId) });
-        await ctx.updateState("none", {});
-        
-        return ctx.reply(`🎉 **Promo Code Applied!**\n\n**₹${promoData.amount}** has been added to your wallet.`, { parse_mode: "Markdown" });
-    }
-
     // --- CREATE PROMO (ADMIN) ---
     if (step === "add_promo_code") {
-        await ctx.updateState("add_promo_amount", { code: text.trim().toUpperCase() });
-        return ctx.reply("Step 2/3: Enter Bonus **Amount** (e.g., 50):");
+        await ctx.updateState("add_promo_type", { code: text.trim().toUpperCase() });
+        return ctx.reply("Step 2/5: Enter discount type (Type **FLAT** or **PERCENT**):", { parse_mode: "Markdown" });
     }
-    if (step === "add_promo_amount") {
-        await ctx.updateState("add_promo_limit", { ...data, amount: parseFloat(text) });
-        return ctx.reply("Step 3/3: Max number of users who can claim this (e.g., 100):");
+    if (step === "add_promo_type") {
+        const type = text.trim().toUpperCase();
+        if (type !== "FLAT" && type !== "PERCENT") return ctx.reply("❌ Please type FLAT or PERCENT.");
+        await ctx.updateState("add_promo_value", { ...data, type });
+        return ctx.reply(`Step 3/5: Enter the discount value (e.g., 25 for ${type === 'FLAT' ? '₹25' : '25%'}):`);
+    }
+    if (step === "add_promo_value") {
+        await ctx.updateState("add_promo_min_order", { ...data, value: parseFloat(text) });
+        return ctx.reply("Step 4/5: Enter **Minimum Order Amount** to use this promo (e.g., 27):");
+    }
+    if (step === "add_promo_min_order") {
+        await ctx.updateState("add_promo_limit", { ...data, minOrder: parseFloat(text) });
+        return ctx.reply("Step 5/5: Max number of users who can claim this (e.g., 100):");
     }
     if (step === "add_promo_limit") {
         await db.collection("promos").doc(data.code).set({
-            amount: data.amount, maxUses: parseInt(text), usedBy: [], createdAt: admin.firestore.FieldValue.serverTimestamp()
+            type: data.type, value: data.value, minOrder: data.minOrder, maxUses: parseInt(text), usedBy: [], createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
         await ctx.updateState("none", {});
         return ctx.reply(`✅ Promo Code **${data.code}** created successfully!`, { parse_mode: "Markdown" });
@@ -437,20 +421,62 @@ bot.on("message:text", async (ctx, next) => {
             return ctx.reply(`🔢 **Enter Quantity**\n*(Min: ${data.service.min} | Max: ${data.service.max})*`, { parse_mode: "Markdown" });
         }
     }
+    
     if (step === "order_quantity") {
         const qty = parseInt(text);
         if (isNaN(qty) || qty < data.service.min || qty > data.service.max) return ctx.reply(`❌ Qty must be between ${data.service.min} and ${data.service.max}.`);
         
+        const originalPrice = parseFloat(((data.service.price / 1000) * qty).toFixed(2));
         data.quantity = qty;
-        data.totalPrice = parseFloat(((data.service.price / 1000) * qty).toFixed(2));
+        data.originalPrice = originalPrice;
+        data.finalPrice = originalPrice;
+        
+        await ctx.updateState("order_ask_promo", data);
+        return ctx.reply(`💰 Order Total is **₹${originalPrice}**\n\n🎁 **Do you have a Promo Code?**\nType your code below, or type **/skip** to continue without a code.`, { parse_mode: "Markdown" });
+    }
+
+    // --- PROMO CODE VALIDATION ---
+    if (step === "order_ask_promo") {
+        if (text !== "/skip") {
+            const code = text.trim().toUpperCase();
+            const promoDoc = await db.collection("promos").doc(code).get();
+
+            if (!promoDoc.exists) return ctx.reply("❌ Invalid Promo Code. Try again or type /skip.");
+            const promoData = promoDoc.data();
+
+            if (promoData.usedBy.includes(userId)) return ctx.reply("⚠️ You have already used this code. Try another or type /skip.");
+            if (promoData.usedBy.length >= promoData.maxUses) return ctx.reply("❌ Code usage limit reached. Try another or type /skip.");
+            if (data.originalPrice < promoData.minOrder) return ctx.reply(`❌ Order must be at least ₹${promoData.minOrder} to use this code. Try again or type /skip.`);
+
+            // Apply Discount
+            let discountAmount = 0;
+            if (promoData.type === "FLAT") discountAmount = promoData.value;
+            else if (promoData.type === "PERCENT") discountAmount = (data.originalPrice * promoData.value) / 100;
+            
+            if (discountAmount > data.originalPrice) discountAmount = data.originalPrice; // Can't be negative
+
+            data.finalPrice = parseFloat((data.originalPrice - discountAmount).toFixed(2));
+            data.promoCode = code;
+            data.discountAmount = parseFloat(discountAmount.toFixed(2));
+
+            await ctx.reply(`🎉 **Promo Applied!** You saved ₹${data.discountAmount}.`, { parse_mode: "Markdown" });
+        }
+
         await ctx.updateState("order_confirm", data);
         
         const inline = new InlineKeyboard().text("✅ Confirm & Pay", "confirm_order").text("❌ Cancel", "cancel_order");
-        let summary = `🧾 **Order Summary**\n\n🛒 ${data.service.name}\n🔢 Qty: ${qty}\n💰 **Total: ₹${data.totalPrice}**\n\nYour Details:\n`;
-        data.answers.forEach(a => summary += `- ${a.question}: ${a.answer}\n`);
+        let summary = `🧾 **Order Summary**\n\n🛒 ${data.service.name}\n🔢 Qty: ${data.quantity}\n`;
         
+        if (data.promoCode) {
+            summary += `💰 Original Price: ~~₹${data.originalPrice}~~\n🎁 Promo (${data.promoCode}): -₹${data.discountAmount}\n🔥 **Final Price: ₹${data.finalPrice}**\n\nYour Details:\n`;
+        } else {
+            summary += `💰 **Total Price: ₹${data.finalPrice}**\n\nYour Details:\n`;
+        }
+        
+        data.answers.forEach(a => summary += `- ${a.question}: ${a.answer}\n`);
         return ctx.reply(summary, { parse_mode: "Markdown", reply_markup: inline });
     }
+
     return next();
 });
 
@@ -466,30 +492,36 @@ bot.callbackQuery("cancel_order", async (ctx) => {
 bot.callbackQuery("confirm_order", async (ctx) => {
     await ctx.answerCallbackQuery("Processing...");
     const data = ctx.dbUser.tempData;
+    const userId = ctx.from.id.toString();
     if (ctx.dbUser.step !== "order_confirm" || !data.service) return ctx.editMessageText("Session expired.");
 
-    const userDoc = await db.collection("users").doc(ctx.from.id.toString()).get();
+    const userDoc = await db.collection("users").doc(userId).get();
     const balance = userDoc.data().walletBalance || 0;
 
-    if (balance < data.totalPrice) {
+    if (balance < data.finalPrice) {
         await ctx.updateState("none", {});
-        return ctx.editMessageText(`❌ **Insufficient Balance!**\nYou have ₹${balance}, but need ₹${data.totalPrice}.`);
+        return ctx.editMessageText(`❌ **Insufficient Balance!**\nYou have ₹${balance}, but need ₹${data.finalPrice}.`);
     }
 
-    await db.collection("users").doc(ctx.from.id.toString()).update({ walletBalance: admin.firestore.FieldValue.increment(-data.totalPrice) });
+    // Deduct Balance & Record Promo Usage
+    await db.collection("users").doc(userId).update({ walletBalance: admin.firestore.FieldValue.increment(-data.finalPrice) });
+    if (data.promoCode) {
+        await db.collection("promos").doc(data.promoCode).update({ usedBy: admin.firestore.FieldValue.arrayUnion(userId) });
+    }
 
     const orderId = "ORD" + Math.floor(100000 + Math.random() * 900000);
     await db.collection("orders").doc(orderId).set({
-        userId: ctx.from.id.toString(), serviceId: data.serviceId, serviceName: data.service.name,
-        quantity: data.quantity, totalPrice: data.totalPrice, answers: data.answers, status: "pending",
+        userId: userId, serviceId: data.serviceId, serviceName: data.service.name,
+        quantity: data.quantity, originalPrice: data.originalPrice, finalPrice: data.finalPrice, 
+        promoCode: data.promoCode || null, answers: data.answers, status: "pending",
         timestamp: admin.firestore.FieldValue.serverTimestamp()
     });
     
     await ctx.updateState("none", {});
-    await ctx.editMessageText(`✅ **Order Placed!**\n🆔 #${orderId}\n💰 ₹${data.totalPrice} deducted.`, { parse_mode: "Markdown" });
+    await ctx.editMessageText(`✅ **Order Placed!**\n🆔 #${orderId}\n💰 ₹${data.finalPrice} deducted.`, { parse_mode: "Markdown" });
 
     const admins = await db.collection("users").where("role", "==", "admin").get();
-    let adminAlert = `🚨 **NEW ORDER!**\n🆔 #${orderId}\n👤 \`${ctx.from.id}\`\n🛒 ${data.service.name}\n🔢 Qty: ${data.quantity} | 💰 ₹${data.totalPrice}\n\n**Details:**\n`;
+    let adminAlert = `🚨 **NEW ORDER!**\n🆔 #${orderId}\n👤 \`${ctx.from.id}\`\n🛒 ${data.service.name}\n🔢 Qty: ${data.quantity} | 💰 Paid: ₹${data.finalPrice}\n\n**Details:**\n`;
     data.answers.forEach(a => adminAlert += `🔹 ${a.question}: \`${a.answer}\`\n`);
     
     const adminAction = new InlineKeyboard().text("🔄 Processing", `ord_processing_${orderId}`).row()
@@ -512,10 +544,10 @@ bot.callbackQuery(/^ord_(processing|completed|refund)_(ORD[0-9]+)$/, async (ctx)
 
     if (action === "refund") {
         if (ordData.status === "refunded") return;
-        await db.collection("users").doc(ordData.userId).update({ walletBalance: admin.firestore.FieldValue.increment(ordData.totalPrice) });
+        await db.collection("users").doc(ordData.userId).update({ walletBalance: admin.firestore.FieldValue.increment(ordData.finalPrice) });
         await ordRef.update({ status: "refunded" });
         await ctx.editMessageText(ctx.callbackQuery.message.text + "\n\n❌ **Status: REFUNDED (Money returned)**", { parse_mode: "Markdown" });
-        await bot.api.sendMessage(ordData.userId, `🔔 **Order Update**\n\nOrder #${orderId} Cancelled. **₹${ordData.totalPrice}** refunded to wallet.`, { parse_mode: "Markdown" });
+        await bot.api.sendMessage(ordData.userId, `🔔 **Order Update**\n\nOrder #${orderId} Cancelled. **₹${ordData.finalPrice}** refunded to wallet.`, { parse_mode: "Markdown" });
     } else {
         await ordRef.update({ status: action });
         await ctx.editMessageText(ctx.callbackQuery.message.text + `\n\n✅ **Status: ${action.toUpperCase()}**`, { parse_mode: "Markdown" });
